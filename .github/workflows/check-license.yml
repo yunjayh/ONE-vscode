@@ -1,4 +1,4 @@
-name: License Self Verification
+name: License Verification
 
 on:
   push:
@@ -9,17 +9,6 @@ on:
 jobs:
   license_verification:
     runs-on: ${{ matrix.os }}
-
-    outputs:
-      ubuntu-latest_md: ${{ steps.self_verification.outputs.ubuntu-latest_md }}
-      ubuntu-latest_warn_cnt: ${{ steps.self_verification.outputs.ubuntu-latest_warn_cnt }}
-      ubuntu-latest_denied_cnt: ${{ steps.self_verification.outputs.ubuntu-latest_denied_cnt }}
-      windows-latest_md: ${{ steps.self_verification.outputs.windows-latest_md }}
-      windows-latest_warn_cnt: ${{ steps.self_verification.outputs.windows-latest_warn_cnt }}
-      windows-latest_denied_cnt: ${{ steps.self_verification.outputs.windows-latest_denied_cnt }}
-      macos-latest_md: ${{ steps.self_verification.outputs.macos-latest_md }}
-      macos-latest_warn_cnt: ${{ steps.self_verification.outputs.macos-latest_warn_cnt }}
-      macos-latest_denied_cnt: ${{ steps.self_verification.outputs.macos-latest_denied_cnt }}
 
     strategy:
       matrix:
@@ -32,21 +21,16 @@ jobs:
           node-version: '16'
       - run: npm install
       - run: npx license-checker --unknown --json --out license_list.json
-      - id: self_verification
+      - id: verification
         shell: bash
         run: |
-          npx ts-node infra/license/license_self_verify.ts license_list.json ${{ matrix.os }}
+          npx ts-node infra/license/license-checker.ts license_list.json ${{ matrix.os }}
 
-          RESULT=$(cat ${{ matrix.os }}.md)
-          RESULT="${RESULT//$'\n'/$'%0A'}"
-          RESULT="${RESULT//$'\r'/$'%0D'}"
-
-          WARN_CNT=$(cat ${{ matrix.os }}.warning.cnt)
-          DENIED_CNT=$(cat ${{ matrix.os }}.denied.cnt)
-
-          echo "::set-output name=${{ matrix.os }}_md::$RESULT"
-          echo "::set-output name=${{ matrix.os }}_warn_cnt::$WARN_CNT"
-          echo "::set-output name=${{ matrix.os }}_denied_cnt::$DENIED_CNT"
+      - uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.os }}.json
+          path: ${{ matrix.os }}.json
+          retention-days: 1
   
   report_verification_result:
     runs-on: ubuntu-latest
@@ -54,47 +38,35 @@ jobs:
     needs: [ license_verification ]
 
     steps:
-      - id: result_integration
-        run: |
-          WARN_COUNT=$((${{ needs.license_verification.outputs.ubuntu-latest_warn_cnt }} + \
-            ${{ needs.license_verification.outputs.windows-latest_warn_cnt }} + \
-            ${{ needs.license_verification.outputs.macos-latest_warn_cnt }}))
-          DENIED_COUNT=$((${{ needs.license_verification.outputs.ubuntu-latest_denied_cnt }} + \
-            ${{ needs.license_verification.outputs.windows-latest_denied_cnt }} + \
-            ${{ needs.license_verification.outputs.macos-latest_denied_cnt }}))
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+        with:
+          node-version: '16'
 
-          echo "### License Self Verification (DRAFT / NOT OFFICIAL)" > result
-          echo "" >> result
-          if [ "$WARN_COUNT" -ne "0" ] || ["$DENIED_COUNT" -ne "0" ]; then
-            echo ":warning: Total ${WARN_COUNT} Warnings Found" >> result
-            echo ":no_entry: Total ${DENIED_COUNT} Denials Found" >> result
-          else
-            echo ":heavy_check_mark: No License Issues Found" >> result
-          fi
-          echo "<details><summary>Detailed Result</summary>" >> result
-          echo "" >> result
-          echo "${{ needs.license_verification.outputs.ubuntu-latest_md }}" >> result
-          echo "" >> result
-          echo "---" >> result
-          echo "" >> result
-          echo "${{ needs.license_verification.outputs.windows-latest_md }}" >> result
-          echo "" >> result
-          echo "---" >> result
-          echo "" >> result
-          echo "${{ needs.license_verification.outputs.macos-latest_md }}" >> result
-          echo "</details>" >> result
+      - uses: actions/download-artifact@v3
+        with:
+          name: ubuntu-latest.json
 
-          RESULT=$(cat result)
-          RESULT="${RESULT//$'\n'/$'%0A'}"
-          RESULT="${RESULT//$'\r'/$'%0D'}"
-          echo "::set-output name=body::$RESULT"
+      - uses: actions/download-artifact@v3
+        with:
+          name: macos-latest.json
+
+      - uses: actions/download-artifact@v3
+        with:
+          name: windows-latest.json
+  
+      - run: npm install
+      - run: npx ts-node infra/license/check-result-formatter.ts ubuntu-latest.json windows-latest.json macos-latest.json
 
       - uses: actions/github-script@v6
         with:
           script: |
+            var fs = require('fs');
+            var body_content = fs.readFileSync('license_check_result.md', 'utf-8');
+
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `${{ steps.result_integration.outputs.body }}`
+              body: body_content
             })
